@@ -22,3 +22,8 @@ Waiting for Member A
 Member A has sent her part
 Trying to merge that into my part
 Testing...
+Also improved Week 2 task
+Waiting for Member A
+Member A has sent her part
+Trying to merge that into my part
+Testing...
