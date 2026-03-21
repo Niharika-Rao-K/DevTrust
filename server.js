@@ -93,7 +93,8 @@ async function processQueue() {
 
             console.log(`🚀 Minting reward for PR #${reward.prId}...`);
             
-            const tx = await contract.addRecord(reward.wallet, reward.prId);
+            // We add .toString() to fix the "invalid string value" error
+            const tx = await contract.addRecord(reward.wallet, reward.prId.toString());
             const receipt = await tx.wait();
 
             reward.status = "COMPLETED";
