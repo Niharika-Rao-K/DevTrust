@@ -20,3 +20,13 @@ New change
 Test new
 Test new
 New change
+Have to make ppt
+Week 3 is completed
+Week 4 is nearinf completion
+Successfully merged Member A's part
+3 days for first review
+Have to make ppt
+New change
+New change
+Test new
+Test new
