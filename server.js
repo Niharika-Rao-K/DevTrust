@@ -11,19 +11,23 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 const LOGS_PATH = './logs.json';
 const DB_PATH = './db.json';
-const CONTRACT_PATH = "./DevTrust.json";
+const CONTRACT_PATH = "./DevTrust.json"; // Ensure this file is in your root folder!
 
 // --- BLOCKCHAIN SETUP ---
 const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
-// Load ABI
-const contractJson = JSON.parse(fs.readFileSync(CONTRACT_PATH));
-const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, contractJson.abi, wallet);
+// Load ABI safely
+let contract;
+try {
+    const contractJson = JSON.parse(fs.readFileSync(CONTRACT_PATH, 'utf8'));
+    contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, contractJson.abi, wallet);
+} catch (err) {
+    console.error("❌ ERROR: Could not find or read DevTrust.json. Ensure it is uploaded!");
+}
 
 /**
  * 1. WEBHOOK ENDPOINT
- * Listens for GitHub events and extracts wallet addresses from PR descriptions.
  */
 app.post('/webhook', (req, res) => {
     const event = req.headers['x-github-event'];
@@ -44,18 +48,17 @@ app.post('/webhook', (req, res) => {
                 timestamp: new Date().toISOString()
             };
 
-            // --- FIXED SECTION START ---
+            // SAFE LOAD: logs.json
             let logs = [];
             if (fs.existsSync(LOGS_PATH)) {
                 try {
-                    logs = JSON.parse(fs.readFileSync(LOGS_PATH, 'utf8') || "[]");
+                    const data = fs.readFileSync(LOGS_PATH, 'utf8');
+                    logs = JSON.parse(data || "[]");
                 } catch (e) { logs = []; }
             }
-            // --- FIXED SECTION END ---
 
             logs.push(newLog);
             fs.writeFileSync(LOGS_PATH, JSON.stringify(logs, null, 2));
-
             console.log(`✅ Added to queue for wallet: ${foundWallet[0]}`);
         } else {
             console.log("⚠️ No wallet address found in PR description. Skipping.");
@@ -63,16 +66,20 @@ app.post('/webhook', (req, res) => {
     }
     res.status(200).send('OK');
 });
+
 /**
  * 2. BLOCKCHAIN PROCESSOR
- * Automatically processes PENDING_BLOCKCHAIN entries every 60 seconds.
  */
 async function processQueue() {
     if (!fs.existsSync(LOGS_PATH)) return;
 
-    let logs = JSON.parse(fs.readFileSync(LOGS_PATH, 'utf8') || "[]");
-    const pending = logs.filter(l => l.status === "PENDING_BLOCKCHAIN");
+    let logs = [];
+    try {
+        const data = fs.readFileSync(LOGS_PATH, 'utf8');
+        logs = JSON.parse(data || "[]");
+    } catch (e) { return; }
 
+    const pending = logs.filter(l => l.status === "PENDING_BLOCKCHAIN");
     if (pending.length === 0) return;
 
     console.log(`\n⛓️  Processing ${pending.length} pending rewards...`);
@@ -81,47 +88,45 @@ async function processQueue() {
         if (reward.status !== "PENDING_BLOCKCHAIN") continue;
 
         try {
-            // Mark as processing immediately to prevent duplicate runs
             reward.status = "PROCESSING";
             fs.writeFileSync(LOGS_PATH, JSON.stringify(logs, null, 2));
 
             console.log(`🚀 Minting reward for PR #${reward.prId}...`);
             
-            // Call the 'addRecord' or 'mint' function on your contract
             const tx = await contract.addRecord(reward.wallet, reward.prId);
             const receipt = await tx.wait();
 
             reward.status = "COMPLETED";
             reward.txHash = receipt.hash;
 
-            // Update Transaction History (db.json)
             updateAuditTrail(reward);
-            
             console.log(`✨ Success! Tx: ${receipt.hash}`);
         } catch (error) {
             reward.status = "FAILED";
-            console.error(`❌ Blockchain Error for PR #${reward.prId}:`, error.message);
+            console.error(`❌ Error for PR #${reward.prId}:`, error.message);
         }
         
-        // Save status update
         fs.writeFileSync(LOGS_PATH, JSON.stringify(logs, null, 2));
     }
 }
 
+/**
+ * 3. AUDIT TRAIL HELPER
+ */
 function updateAuditTrail(record) {
     let db = { transactions: [] };
     if (fs.existsSync(DB_PATH)) {
-        db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8') || '{"transactions":[]}');
+        try {
+            const data = fs.readFileSync(DB_PATH, 'utf8');
+            db = JSON.parse(data || '{"transactions":[]}');
+        } catch (e) { db = { transactions: [] }; }
     }
     db.transactions.push(record);
     fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
-// Start Server and Set interval for processor
 app.listen(PORT, () => {
     console.log(`🚀 Webhook Listener running on port ${PORT}`);
     console.log(`⚙️  Blockchain Processor active (60s intervals)`);
-    
-    // Run the queue processor every 60 seconds
     setInterval(processQueue, 60000);
 });
