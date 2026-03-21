@@ -32,7 +32,6 @@ app.post('/webhook', (req, res) => {
     if (event === 'pull_request' && action === 'closed' && pull_request.merged === true) {
         console.log(`\n🔔 Merged PR Detected: #${pull_request.number} by ${pull_request.user.login}`);
 
-        // Regex to find Ethereum address in the PR body
         const walletRegex = /0x[a-fA-F0-9]{40}/;
         const foundWallet = pull_request.body ? pull_request.body.match(walletRegex) : null;
 
@@ -45,8 +44,15 @@ app.post('/webhook', (req, res) => {
                 timestamp: new Date().toISOString()
             };
 
-            // Save to logs.json
-            let logs = JSON.parse(fs.readFileSync(LOGS_PATH, 'utf8') || "[]");
+            // --- FIXED SECTION START ---
+            let logs = [];
+            if (fs.existsSync(LOGS_PATH)) {
+                try {
+                    logs = JSON.parse(fs.readFileSync(LOGS_PATH, 'utf8') || "[]");
+                } catch (e) { logs = []; }
+            }
+            // --- FIXED SECTION END ---
+
             logs.push(newLog);
             fs.writeFileSync(LOGS_PATH, JSON.stringify(logs, null, 2));
 
@@ -57,7 +63,6 @@ app.post('/webhook', (req, res) => {
     }
     res.status(200).send('OK');
 });
-
 /**
  * 2. BLOCKCHAIN PROCESSOR
  * Automatically processes PENDING_BLOCKCHAIN entries every 60 seconds.
