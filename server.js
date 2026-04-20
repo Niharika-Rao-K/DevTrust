@@ -26,7 +26,7 @@ const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, contractABI, 
 
 // --- Utility Functions ---
 
-// 1. Extract Wallet Address from PR Description
+// Extract Wallet Address
 function extractWallet(text) {
     if (!text) return null;
     const regex = /0x[a-fA-F0-9]{40}/;
@@ -34,79 +34,108 @@ function extractWallet(text) {
     return match ? match[0] : null;
 }
 
-// 2. Add Event to local Queue (db.json)
+// Add Event to Queue
 function addToQueue(walletAddress, prId, type) {
     const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
-    
-    // Avoid duplicates
-    if (db.find(item => item.prId === prId)) return;
+
+    if (db.find(item => item.prId === prId)) {
+        console.log(`⚠️ PR #${prId} already exists in DB. Skipping...`);
+        return;
+    }
 
     db.push({
         prId,
         wallet: walletAddress,
-        type, // "SUCCESS" or "REJECTED"
+        type,
         status: "PENDING_BLOCKCHAIN",
         timestamp: new Date().toISOString()
     });
+
     fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+    console.log(`📥 Added PR #${prId} to queue`);
 }
 
-// --- Endpoints ---
-
-// 1. GitHub Webhook Listener
+// --- Webhook Endpoint ---
 app.post("/webhook", (req, res) => {
+    console.log("\n==============================");
+    console.log("📩 Webhook Received");
+
+    const event = req.headers["x-github-event"];
+    console.log("Event:", event);
+
+    if (event !== "pull_request") {
+        console.log("⏭ Ignored non-PR event");
+        return res.status(200).send("Ignored");
+    }
+
     const { action, pull_request } = req.body;
+
+    console.log("Action:", action);
+
+    if (!pull_request) {
+        console.log("❌ No pull_request object found");
+        return res.status(200).send("Invalid payload");
+    }
 
     if (action === "closed") {
         const prId = pull_request.number.toString();
+        console.log(`🔍 Processing PR #${prId}`);
+
         const userWallet = extractWallet(pull_request.body);
+        console.log("Extracted Wallet:", userWallet);
 
         if (!userWallet) {
-            console.log(`⚠️ PR #${prId} closed but no wallet address found in description.`);
-            return res.status(200).send("No wallet found");
+            console.log(`⚠️ No wallet found in PR #${prId}`);
+            return res.status(200).send("No wallet");
         }
 
         if (pull_request.merged === true) {
-            console.log(`✅ PR #${prId} MERGED. Queuing for Reward...`);
+            console.log(`✅ PR #${prId} MERGED`);
             addToQueue(userWallet, prId, "SUCCESS");
         } else {
-            console.log(`❌ PR #${prId} REJECTED. Queuing for Slashing...`);
+            console.log(`❌ PR #${prId} CLOSED WITHOUT MERGE`);
             addToQueue(userWallet, prId, "REJECTED");
         }
     }
+
     res.status(200).send("Webhook Processed");
 });
 
-// 2. Data API for Member C (Frontend)
+// --- API Endpoint ---
 app.get("/api/logs", (req, res) => {
     const data = fs.readFileSync(DB_PATH, "utf8");
     res.json(JSON.parse(data));
 });
 
-// --- Background Blockchain Processor ---
+// --- Blockchain Processor ---
 async function processQueue() {
     let db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
     const pending = db.filter(item => item.status === "PENDING_BLOCKCHAIN");
 
-    if (pending.length === 0) return;
+    if (pending.length === 0) {
+        console.log("⏳ No pending events");
+        return;
+    }
 
     console.log(`⛓️ Processing ${pending.length} pending events...`);
 
     for (const item of pending) {
         try {
             let tx;
+
             if (item.type === "SUCCESS") {
-                console.log(`🚀 Minting reward for PR #${item.prId}...`);
+                console.log(`🚀 Minting reward for PR #${item.prId}`);
                 tx = await contract.addRecord(item.wallet, item.prId);
             } else {
-                console.log(`🧨 Slashing/Rejecting for PR #${item.prId}...`);
-                // Note: Ensure Member A has 'slashRecord' or similar in the contract
-                tx = await contract.slashRecord(item.wallet, item.prId); 
+                console.log(`🧨 Slashing PR #${item.prId}`);
+                tx = await contract.slashRecord(item.wallet, item.prId);
             }
 
             const receipt = await tx.wait();
+
             item.status = "COMPLETED";
             item.txHash = receipt.hash;
+
             console.log(`✨ Success! Tx: ${receipt.hash}`);
 
         } catch (error) {
@@ -119,10 +148,16 @@ async function processQueue() {
     fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
-// Run processor every 60 seconds
-setInterval(processQueue, 60000);
+// --- Run Processor (Reduced time for testing) ---
+setInterval(processQueue, 10000); // 10 sec for testing
 
+// --- Root Route (for browser testing) ---
+app.get("/", (req, res) => {
+    res.send("🚀 DevTrust Backend is Live");
+});
+
+// --- Start Server ---
 app.listen(PORT, () => {
     console.log(`🚀 Webhook Listener running on port ${PORT}`);
-    console.log(`⚙️ Blockchain Processor active (60s intervals)`);
+    console.log(`⚙️ Blockchain Processor active (10s intervals)`);
 });
