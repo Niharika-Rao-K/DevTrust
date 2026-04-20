@@ -18,7 +18,7 @@ if (!fs.existsSync(DB_PATH)) {
 }
 
 // --- Blockchain Setup ---
-const provider = new ethers.JsonRpcProvider(process.env.ALCHEMY_RPC_URL);
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 const contractJSON = JSON.parse(fs.readFileSync(ABI_PATH, "utf8"));
 const contractABI = contractJSON.abi;
