@@ -2,19 +2,22 @@ const express = require("express");
 const { ethers } = require("ethers");
 const fs = require("fs");
 const path = require("path");
+const cors = require("cors"); // Added for Member C
 require("dotenv").config();
 
 const app = express();
 app.use(express.json());
+app.use(cors()); // Enable CORS for frontend integration
 
 // --- Configuration & Paths ---
 const PORT = process.env.PORT || 3000;
 const DB_PATH = path.join(__dirname, "db.json");
 const ABI_PATH = path.join(__dirname, "DevTrust.json");
 
-// --- Initialize Database File if it doesn't exist ---
+// --- Initialize Database File with correct structure ---
 if (!fs.existsSync(DB_PATH)) {
-    fs.writeFileSync(DB_PATH, JSON.stringify([], null, 2));
+    const initialDB = { users: [], logs: [] };
+    fs.writeFileSync(DB_PATH, JSON.stringify(initialDB, null, 2));
 }
 
 // --- Blockchain Setup ---
@@ -26,7 +29,7 @@ const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, contractABI, 
 
 // --- Utility Functions ---
 
-// Extract Wallet Address
+// Extract Wallet Address from text
 function extractWallet(text) {
     if (!text) return null;
     const regex = /0x[a-fA-F0-9]{40}/;
@@ -34,130 +37,114 @@ function extractWallet(text) {
     return match ? match[0] : null;
 }
 
-// Add Event to Queue
-function addToQueue(walletAddress, prId, type) {
-    const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+// Helper to Read/Write DB safely
+const readDB = () => JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+const writeDB = (data) => fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
 
-    if (db.find(item => item.prId === prId)) {
-        console.log(`⚠️ PR #${prId} already exists in DB. Skipping...`);
-        return;
+// --- API Endpoints ---
+
+// 1. User Registration (For Member C to link GitHub + Wallet)
+app.post("/api/register", (req, res) => {
+    const { githubUsername, walletAddress } = req.body;
+    const db = readDB();
+
+    if (!githubUsername || !walletAddress) {
+        return res.status(400).json({ error: "Missing username or wallet" });
     }
 
-    db.push({
-        prId,
-        wallet: walletAddress,
-        type,
-        status: "PENDING_BLOCKCHAIN",
-        timestamp: new Date().toISOString()
-    });
+    const existingUser = db.users.find(u => u.github === githubUsername);
+    if (!existingUser) {
+        db.users.push({ github: githubUsername, wallet: walletAddress });
+        writeDB(db);
+        console.log(`👤 Registered new user: ${githubUsername}`);
+        return res.json({ message: "Registration successful" });
+    }
+    res.json({ message: "User already registered" });
+});
 
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-    console.log(`📥 Added PR #${prId} to queue`);
-}
+// 2. Get Logs (For Member C's Dashboard)
+app.get("/api/logs", (req, res) => {
+    const db = readDB();
+    res.json(db.logs);
+});
 
 // --- Webhook Endpoint ---
 app.post("/webhook", (req, res) => {
     console.log("\n==============================");
-    console.log("📩 Webhook Received");
-
     const event = req.headers["x-github-event"];
-    console.log("Event:", event);
-
-    if (event !== "pull_request") {
-        console.log("⏭ Ignored non-PR event");
-        return res.status(200).send("Ignored");
-    }
+    
+    if (event !== "pull_request") return res.status(200).send("Ignored");
 
     const { action, pull_request } = req.body;
-
-    console.log("Action:", action);
-
-    if (!pull_request) {
-        console.log("❌ No pull_request object found");
-        return res.status(200).send("Invalid payload");
-    }
-
     if (action === "closed") {
         const prId = pull_request.number.toString();
-        console.log(`🔍 Processing PR #${prId}`);
-
-        const userWallet = extractWallet(pull_request.body);
-        console.log("Extracted Wallet:", userWallet);
+        const githubUser = pull_request.user.login;
+        
+        // Step 1: Try to find wallet in PR Body
+        let userWallet = extractWallet(pull_request.body);
+        
+        // Step 2: If not in body, look up in our DB
+        if (!userWallet) {
+            const db = readDB();
+            const found = db.users.find(u => u.github === githubUser);
+            if (found) userWallet = found.wallet;
+        }
 
         if (!userWallet) {
-            console.log(`⚠️ No wallet found in PR #${prId}`);
-            return res.status(200).send("No wallet");
+            console.log(`⚠️ No wallet found for ${githubUser} in PR #${prId}`);
+            return res.status(200).send("No wallet found");
         }
 
-        if (pull_request.merged === true) {
-            console.log(`✅ PR #${prId} MERGED`);
-            addToQueue(userWallet, prId, "SUCCESS");
-        } else {
-            console.log(`❌ PR #${prId} CLOSED WITHOUT MERGE`);
-            addToQueue(userWallet, prId, "REJECTED");
-        }
+        const db = readDB();
+        // Prevent duplicates
+        if (db.logs.find(item => item.prId === prId)) return res.status(200).send("Duplicate");
+
+        db.logs.push({
+            prId,
+            githubUser,
+            wallet: userWallet,
+            type: pull_request.merged ? "SUCCESS" : "REJECTED",
+            status: "PENDING_BLOCKCHAIN",
+            timestamp: new Date().toISOString()
+        });
+
+        writeDB(db);
+        console.log(`📥 PR #${prId} added to queue for ${githubUser}`);
     }
-
-    res.status(200).send("Webhook Processed");
-});
-
-// --- API Endpoint ---
-app.get("/api/logs", (req, res) => {
-    const data = fs.readFileSync(DB_PATH, "utf8");
-    res.json(JSON.parse(data));
+    res.status(200).send("Processed");
 });
 
 // --- Blockchain Processor ---
 async function processQueue() {
-    let db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
-    const pending = db.filter(item => item.status === "PENDING_BLOCKCHAIN");
+    let db = readDB();
+    const pending = db.logs.filter(item => item.status === "PENDING_BLOCKCHAIN");
 
-    if (pending.length === 0) {
-        console.log("⏳ No pending events");
-        return;
-    }
-
-    console.log(`⛓️ Processing ${pending.length} pending events...`);
+    if (pending.length === 0) return;
 
     for (const item of pending) {
         try {
+            console.log(`🚀 Processing PR #${item.prId} on Sepolia...`);
             let tx;
-
             if (item.type === "SUCCESS") {
-                console.log(`🚀 Minting reward for PR #${item.prId}`);
                 tx = await contract.addRecord(item.wallet, item.prId);
             } else {
-                console.log(`🧨 Slashing PR #${item.prId}`);
                 tx = await contract.slashRecord(item.wallet, item.prId);
             }
 
             const receipt = await tx.wait();
-
             item.status = "COMPLETED";
             item.txHash = receipt.hash;
-
-            console.log(`✨ Success! Tx: ${receipt.hash}`);
-
+            console.log(`✨ Tx Confirmed: ${receipt.hash}`);
         } catch (error) {
-            console.error(`❌ Error for PR #${item.prId}:`, error.shortMessage || error.message);
+            console.error(`❌ Blockchain Error:`, error.message);
             item.status = "FAILED";
-            item.error = error.message;
         }
     }
-
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+    writeDB(db);
 }
 
-// --- Run Processor (Reduced time for testing) ---
-setInterval(processQueue, 10000); // 10 sec for testing
+setInterval(processQueue, 15000); // Check every 15 seconds
 
-// --- Root Route (for browser testing) ---
-app.get("/", (req, res) => {
-    res.send("🚀 DevTrust Backend is Live");
-});
+app.get("/", (req, res) => res.send("🚀 DevTrust Backend is Live"));
 
-// --- Start Server ---
-app.listen(PORT, () => {
-    console.log(`🚀 Webhook Listener running on port ${PORT}`);
-    console.log(`⚙️ Blockchain Processor active (10s intervals)`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
